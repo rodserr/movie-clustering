@@ -224,6 +224,7 @@ films_matrix <- lda_documents %>%
 
 rownames(films_matrix) <- films_matrix$document
 films_matrix %<>% select(-one_of(c('document', 'director'))) %>% as.matrix()
+dist.matrix <- proxy::dist(films_matrix, method = "cosine", pairwise = TRUE)
 
 # K-means----
 
