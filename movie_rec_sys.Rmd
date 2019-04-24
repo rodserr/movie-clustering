@@ -1,0 +1,49 @@
+---
+title: "Movie Recommendation System"
+author: "Rodrigo Serrano"
+date: "April, 2019"
+output: html_document
+---
+
+```{r}
+library(jsonlite)
+library(rvest)
+library(purrr)
+library(tidyverse)
+library(magrittr)
+library(tm)
+library(topicmodels)
+library(tidytext)
+library(factoextra)
+library(FactoMineR)
+library(wesanderson)
+
+movies_db <- read_csv("tmdb-5000-movie-dataset/tmdb_5000_movies.csv")
+
+credits_db <- read_csv("tmdb-5000-movie-dataset/tmdb_5000_credits.csv")
+
+genres <- movies_db %>%
+        filter(nchar(genres) > 2) %>%
+        mutate(aux_json = lapply(genres, fromJSON)) %>%
+        unnest(aux_json) %>%
+        select(id, genres = name) %>%
+        mutate_if(is.character, factor)
+
+prod_comp <- movies_db %>%
+        filter(nchar(production_companies) > 2) %>%
+        mutate(aux_json = lapply(production_companies, fromJSON)) %>%
+        unnest(aux_json) %>%
+        select(id, production_companies = name) %>%
+        mutate_if(is.character, factor)
+
+t <- full_join(genres, prod_comp, by = 'id') %>% 
+  group_by(production_companies, genres) %>% 
+  summarise(count = n()) %>% top_n(10, wt = count)
+
+
+data.frame(x = c(10, 4, 1, 6, 3, 1, 1)) %>% top_n(2)
+
+```
+
+
+
