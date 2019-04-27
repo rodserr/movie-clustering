@@ -208,3 +208,82 @@ recommender(frec_matrix, 'Memento')
 
 ```
 
+```{r system_plot}
+
+corpus_plot <- movies_db %>%
+  select(title, overview) %>% 
+  distinct(title, .keep_all = TRUE) %>% 
+  na.omit() %>% 
+  transmute(doc_id = title, text = overview) %>% 
+  as.data.frame() %>% 
+  DataframeSource() %>%
+  Corpus() %>% 
+  tm_map(removePunctuation) %>%
+  tm_map(removeNumbers) %>% 
+  tm_map(content_transformer(tolower)) %>%
+  tm_map(removeWords, stopwords("SMART")) %>%
+  tm_map(stripWhitespace) %>% 
+  tm_map(stemDocument)
+ 
+docterm_plot <- corpus_plot %>% 
+  # DocumentTermMatrix(control = list(weighting = function(x) weightTf(x))) 
+  DocumentTermMatrix(control = list(weighting = function(x) weightTfIdf(x, normalize=FALSE))) 
+
+docterm_plot_sparse <- docterm_plot %>% removeSparseTerms(0.999)
+
+findFreqTerms(docterm_plot_sparse, lowfreq = 500) %>% sort()
+
+tfidf_matrix <- docterm_plot_sparse %>% as.matrix()
+
+tfidf_matrix[1:5, 1:5]
+
+t <- tfidf_matrix[which(row.names(tfidf_matrix) == 'Memento'),]
+
+
+t1 <- proxy::dist(tfidf_matrix, t, method = "cosine")
+
+
+#function by: https://codereview.stackexchange.com/questions/159396/cosine-similarity-of-one-vector-with-many
+cosineDist <- function(x, m){
+  y = x / sqrt(crossprod(x));
+  return(  as.vector((m %*% y) / sqrt(rowSums(m^2))) );
+}
+
+cosine_dist_mat <- cosineDist(t, tfidf_matrix)
+
+term_dist <- data.frame(title = row.names(tfidf_matrix), distance = cosine_dist_mat) 
+
+term_dist %>% 
+  arrange(desc(distance)) %>% 
+  head(10)
+
+```
+
+```{r lda_model}
+
+docterm_tf <- corpus_plot %>% 
+  # DocumentTermMatrix(control = list(weighting = function(x) weightTf(x))) 
+  DocumentTermMatrix(control = list(weighting = function(x) weightTf(x)))
+
+lda <- LDA(docterm_tf, k = 10, 
+           control = list(#estimate.alpha = FALSE, alpha = 5, 
+                          seed = 1234))
+
+lda_topics <- tidy(lda, matrix = "beta")
+
+lda_topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) %>% 
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() 
+# + scale_fill_manual(values = wes_palette(n = 6, name = "GrandBudapest1", type = 'continuous'))
+
+lda_documents <- tidy(lda, matrix = "gamma")
+
+```
+
