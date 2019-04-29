@@ -1,21 +1,31 @@
 ---
-title: "Movie Recommendation System"
+title: "Movie Conten-Based Recommendation System"
 author: "Rodrigo Serrano"
-date: "April, 2019"
-output: html_document
+output: 
+  html_document:
+    toc: true
+    toc_depth: 1
+    code_folding: hide
 ---
 
-```{r init}
+"Machines can never think as humans do but just because something thinks differently from you, does it mean it's not thinking?" Alan Turing in The Imitation Game.
+
+This kernel uses TMDb (The Movie Database) 5000 Movie dataset to build a content-based recommendation engine using plots and metadata. Modern recommendation systems use votes and likes by the user, but perhaps for a plane new user this approach can come in handly.
+
+The dataset is nicely organized and pretty clean, it consists of two files, one with movie information like budget, revenue, user´s votes, etc. And a second that list cast and crew, which can be join by the movie_id column. First i do some exploration to find some cool facts about top actors, directors and got some visualizations. Then i go through three approach to build a recommendation system. Finally i try to use a LDA (Latent Dirichlet Allocation) topic model as a reduction technique to see if i can get similar results as previous.
+
+#### Loading libraries & inspecting datsets
+
+I do heavily use on tydiverse universe. tm and tidytext for text manipulation and topicmodels for LDA. Also, because it comes perfect for the kernel all visualization have wesanderson color palettes
+
+```{r init, message=FALSE, warning=FALSE}
 library(jsonlite)
-library(rvest)
 library(purrr)
 library(tidyverse)
 library(magrittr)
 library(tm)
 library(topicmodels)
 library(tidytext)
-library(factoextra)
-library(FactoMineR)
 library(wesanderson)
 library(GGally)
 
@@ -23,6 +33,14 @@ movies_db <- read_csv("tmdb-5000-movie-dataset/tmdb_5000_movies.csv")
 
 credits_db <- read_csv("tmdb-5000-movie-dataset/tmdb_5000_credits.csv")
 
+glimpse(movies_db)
+
+```
+
+You can see there are some columns in JSON format like genres and production_companies, the same happens with crew and cast in the credits_db. In every cell of theese columns there are several values. e.g genres can have two values for one movie but 4 for other. Lets create some dataframe out of those columns, keeping movie_id to join later on. The trick for this task comes from:
+[https://www.kaggle.com/epfreed/tidydata-movie-dataset-exploration/report]
+
+```{r prep}
 genres <- movies_db %>%
         filter(nchar(genres) > 2) %>%
         mutate(aux_json = lapply(genres, fromJSON)) %>%
@@ -51,52 +69,21 @@ director <- credits_db %>%
   filter(department == 'Directing' & job == 'Director') %>% 
   select(movie_id, name)
 
+head(genres)
 ```
 
-```{r top_directors}
+### Exploring data
 
-genre_1 <- genres %>% group_by(id) %>% summarise(genre = first(genres))
+Lets use ggpairs function of GGally package to inspect correlation and distribution of some variables
 
-top_directors <- director %>% 
-  count(name) %>% 
-  top_n(20, wt = n) %>%  
-  select(name) %>% 
-  pull()
-
-director %>% 
-  filter(name %in% top_directors) %>% 
-  left_join(genre_1, by = c('movie_id' = 'id')) %>% 
-  count(name, genre) %>% 
-  ggplot(aes(x = name, y = n, fill = genre)) +
-  geom_col() + 
-  coord_flip() +
-  scale_fill_manual(values = wes_palette('Darjeeling1', length(unique(genre_1$genre)), type = 'continuous'))
-```
-
-```{r top_actors}
-top_actors <- cast %>% 
-  count(name) %>% 
-  top_n(20, wt = n) %>%  
-  select(name) %>% 
-  pull()
-
-cast %>% 
-  filter(name %in% top_actors) %>% 
-  left_join(genre_1, by = c('movie_id' = 'id')) %>% 
-  count(name, genre) %>% 
-  ggplot(aes(x = name, y = n, fill = genre)) +
-  geom_col() + 
-  coord_flip() +
-  scale_fill_manual(values = wes_palette('Darjeeling1', length(unique(genre_1$genre)), type = 'continuous'))
-```
-
-```{r ggpair}
+```{r ggpair, message=FALSE, warning=FALSE}
 
 lowerFn <- function(data, mapping, method = "lm") {
   ggplot(data = data, mapping = mapping) +
     geom_point(colour = "slategray4", size = 2, shape = 18) +
     geom_smooth(method = method, color = "coral3") +
-    theme_minimal()
+    theme_minimal() +
+    theme(axis.text.x = element_text(size = 8, angle = 45))
 }
 
 movies_db %>% 
@@ -109,24 +96,62 @@ movies_db %>%
 
 ```
 
-```{r votes}
+We see some variables that are skew like budget and revenue that also have the strongest positive correlation. 
 
-movies_db %>%
-  select(vote_average, vote_count) %>% 
-  summary()
+The dataset consist of movies mainly released after 1960, we also see a big jump in the number of movies released after the 90.
 
-movies_db %>% 
-  filter(vote_count > 235) %>%
-  select(id, title, vote_average) %>%
-  left_join(genre_1, by = 'id') %>%
-  top_n(20, wt = vote_average) %>% 
-  ggplot(aes(x = reorder(title, vote_average), y = vote_average, fill = genre)) +
+Vote average is dense around 6, with a little concentration in 0, probably those are expected movies with big production that dind´t like. Vote count is also skew.
+
+Runtime is dense around 100 minutes 
+
+## Top Directors & Actors
+
+From df genres lets take the first genre of every movies assuming is the most representative and join with directos df to get the top directors by number of movies, filling the columns with the genre of every movie
+
+```{r top_directors}
+
+genre_1 <- genres %>% group_by(id) %>% summarise(genre = first(genres))
+
+top_directors <- director %>% 
+  group_by(name) %>%
+  summarise(total_n = n()) %>% 
+  top_n(20, wt = total_n)
+
+director %>% 
+  filter(name %in% top_directors$name) %>% 
+  left_join(genre_1, by = c('movie_id' = 'id')) %>% 
+  count(name, genre) %>% 
+  left_join(top_directors, by = 'name') %>% 
+  ggplot(aes(x = reorder(name, total_n), y = n, fill = genre)) +
   geom_col() + 
   coord_flip() +
-  scale_fill_manual(values = wes_palette('Rushmore', 6, type = 'continuous'))
-  
+  scale_fill_manual(values = wes_palette('Darjeeling1', length(unique(genre_1$genre)), type = 'continuous')) +
+  labs(x = 'Directors', y = 'Number of Movies')
 
 ```
+
+We see that genres that prevail in the top20 directors are action, drama, and comedy. Lets do the same with actors
+
+```{r top_actors}
+top_actors <- cast %>% 
+  group_by(name) %>%
+  summarise(total_n = n()) %>% 
+  top_n(20, wt = total_n)
+
+cast %>% 
+  filter(name %in% top_actors$name) %>% 
+  left_join(genre_1, by = c('movie_id' = 'id')) %>% 
+  count(name, genre) %>% 
+  left_join(top_actors, by = 'name') %>%
+  ggplot(aes(x = reorder(name, total_n), y = n, fill = genre)) +
+  geom_col() + 
+  coord_flip() +
+  scale_fill_manual(values = wes_palette('Darjeeling1', length(unique(genre_1$genre)), type = 'continuous')) +
+  labs(x = 'Actors', y = 'Number of Movies')
+
+```
+
+Lets look now the directors-actors colaborations with revenues
 
 ```{r colaborations}
 
@@ -143,9 +168,82 @@ director %>%
   geom_col(fill = wes_palette('Royal1', 1, type = 'discrete')) + 
   coord_flip() +
   geom_text(aes(label = paste(round(revenue/1000000,1), 'M')), y = 0.5, size = 3, 
-            colour = wes_palette('Darjeeling2', 1, type = 'discrete'))
+            colour = wes_palette('Darjeeling2', 1, type = 'discrete')) +
+  labs(x = 'Top Colaborations', y = 'Number of Movies')
   
 ```
+
+What about the best movies according to this dataset?. First lets see in more detail the distribution of votes 
+
+```{r votes_dist}
+
+movies_db %>%
+  select(vote_average, vote_count) %>% 
+  summary()
+
+```
+
+Lets filter the top 50% that is 235 votes
+
+```{r vote_movies}
+movies_db %>% 
+  filter(vote_count > 235) %>%
+  select(id, title, vote_average) %>%
+  left_join(genre_1, by = 'id') %>%
+  top_n(20, wt = vote_average) %>% 
+  ggplot(aes(x = reorder(title, vote_average), y = vote_average, fill = genre)) +
+  geom_col() + 
+  coord_flip() +
+  scale_fill_manual(values = wes_palette('Rushmore', 6, type = 'continuous')) +
+  labs(x = 'Movies', y = 'Vote Avg')
+```
+
+We see here that most of the movies are drama, though i wouldnt put Psycho as drama since it´s a cult horror movie, or American History X which i consider more like a crime movie, but thats quite subjective. It looks like genre is prevailing by drama, lets look at it
+
+```{r top_genres}
+genres %>% 
+  count(genres) %>% 
+  ggplot(aes(x = reorder(genres, n), y = n)) +
+  geom_col(fill = wes_palette('Zissou1', 1, type = 'discrete')) +
+  coord_flip() +
+  labs(x = 'Genres', y = 'Number of Movies')
+```
+
+```{r}
+
+prod_comp_n <- prod_comp %>%
+  count(id)
+
+
+prod_comp %>% 
+  left_join(movies_db %>% select(id, budget, revenue), by = 'id') %>% 
+  left_join(prod_comp_n, by = 'id') %>%
+  transmute(production_companies, budget = budget/n, revenue = revenue/n) %>% 
+  group_by(production_companies) %>% 
+  summarise(n = n(), budget = mean(budget), revenue = mean(revenue)) %>% 
+  top_n(20, n)
+
+```
+
+
+```{r}
+
+movies_db %>% 
+  select(budget, revenue, vote_count) %>% 
+  summary()
+  
+movies_db %>% 
+  select(id, budget, revenue, vote_count) %>% 
+  filter(revenue < 90000000 & vote_count < 1000) %>% 
+  mutate(independent = ifelse(budget > 790000, 'indie', 'mainstream')) %>% 
+  ggplot(aes(x = revenue, y = vote_count, colour = independent)) +
+  geom_point()
+  
+```
+
+
+
+### System Recommendation
 
 ```{r system_metadata}
 
@@ -175,10 +273,10 @@ corpus_metadata <- movies_db %>%
   DataframeSource() %>%
   Corpus()
 
-docterm_metadata <- DocumentTermMatrix(corpus_metadata,
+dt_md_bin <- DocumentTermMatrix(corpus_metadata,
                         control = list(weighting = function(x) weightBin(x)))
 
-frec_matrix <- docterm_metadata %>% as.matrix()
+frec_matrix <- dt_md_bin %>% as.matrix()
 
 recommender <- function(matr, title = 'Avatar', db = movies_db){
   ind <- which(row.names(matr) == title)
@@ -225,22 +323,17 @@ corpus_plot <- movies_db %>%
   tm_map(stripWhitespace) %>% 
   tm_map(stemDocument)
  
-docterm_plot <- corpus_plot %>% 
+dt_plot_tfidf <- corpus_plot %>% 
   # DocumentTermMatrix(control = list(weighting = function(x) weightTf(x))) 
   DocumentTermMatrix(control = list(weighting = function(x) weightTfIdf(x, normalize=FALSE))) 
 
-docterm_plot_sparse <- docterm_plot %>% removeSparseTerms(0.999)
+dt_plot_tfidf_sparse <- dt_plot_tfidf %>% removeSparseTerms(0.999)
 
-findFreqTerms(docterm_plot_sparse, lowfreq = 500) %>% sort()
+findFreqTerms(dt_plot_tfidf_sparse, lowfreq = 500) %>% sort()
 
-tfidf_matrix <- docterm_plot_sparse %>% as.matrix()
+tfidf_matrix <- dt_plot_tfidf_sparse %>% as.matrix()
 
 tfidf_matrix[1:5, 1:5]
-
-t <- tfidf_matrix[which(row.names(tfidf_matrix) == 'Memento'),]
-
-
-t1 <- proxy::dist(tfidf_matrix, t, method = "cosine")
 
 
 #function by: https://codereview.stackexchange.com/questions/159396/cosine-similarity-of-one-vector-with-many
@@ -249,29 +342,70 @@ cosineDist <- function(x, m){
   return(  as.vector((m %*% y) / sqrt(rowSums(m^2))) );
 }
 
-cosine_dist_mat <- cosineDist(t, tfidf_matrix)
+recommender_cosine <- function(matr, title = 'Avatar'){
+  
+  ind <- which(row.names(matr) == title)
+    
+  t <- matr[ind,] %>% as.numeric()
+  
+  cosine_dist_mat <- cosineDist(t, matr)
+  
+  term_dist <- data.frame(title = row.names(matr), distance = cosine_dist_mat) 
 
-term_dist <- data.frame(title = row.names(tfidf_matrix), distance = cosine_dist_mat) 
+  recommendations <- term_dist %>% 
+    arrange(desc(distance)) %>% 
+    head(10)
 
-term_dist %>% 
-  arrange(desc(distance)) %>% 
-  head(10)
+  return(recommendations)
+}
+
+recommender_cosine(tfidf_matrix, 'Skyfall')
+
 
 ```
 
-```{r lda_model}
+```{r system_combine}
 
-docterm_tf <- corpus_plot %>% 
-  # DocumentTermMatrix(control = list(weighting = function(x) weightTf(x))) 
+corpus_combine <- movies_db %>%
+  select(id, title, overview) %>% 
+  distinct(title, .keep_all = TRUE) %>% 
+  left_join(pasted_genres, by = 'id') %>% 
+  left_join(pasted_directors, by = c('id' = 'movie_id')) %>% 
+  left_join(pasted_cast, by = c('id' = 'movie_id')) %>% 
+  transmute(doc_id = title, text = paste(genres, director, actors, overview)) %>% 
+  as.data.frame() %>% 
+  DataframeSource() %>%
+  Corpus() %>% 
+  tm_map(removePunctuation) %>%
+  tm_map(removeNumbers) %>% 
+  tm_map(content_transformer(tolower)) %>%
+  tm_map(removeWords, stopwords("SMART")) %>%
+  tm_map(stripWhitespace) %>% 
+  tm_map(stemDocument)
+
+dt_combine_tf <- corpus_combine %>% 
   DocumentTermMatrix(control = list(weighting = function(x) weightTf(x)))
 
-lda <- LDA(docterm_tf, k = 10, 
-           control = list(#estimate.alpha = FALSE, alpha = 5, 
+
+
+```
+
+### LDA model
+
+```{r lda_model_try1}
+
+dt_plot_tf <- corpus_plot %>% 
+  DocumentTermMatrix(control = list(weighting = function(x) weightTf(x))) 
+
+
+lda_tf <- LDA(dt_plot_tf, k = 5, 
+           control = list(estimate.alpha = FALSE, alpha = 5, 
                           seed = 1234))
 
-lda_topics <- tidy(lda, matrix = "beta")
+# t <- terms(lda_tf, 10)
+# t1 <- topics(lda_tf, 5)
 
-lda_topics %>%
+tidy(lda_tf, matrix = "beta") %>%
   group_by(topic) %>%
   top_n(10, beta) %>%
   ungroup() %>%
@@ -280,10 +414,71 @@ lda_topics %>%
   ggplot(aes(term, beta, fill = factor(topic))) +
   geom_col(show.legend = FALSE) +
   facet_wrap(~ topic, scales = "free") +
-  coord_flip() 
-# + scale_fill_manual(values = wes_palette(n = 6, name = "GrandBudapest1", type = 'continuous'))
+  coord_flip() +
+  scale_fill_manual(values = wes_palette('Darjeeling1', 5, type = 'continuous'))
 
 lda_documents <- tidy(lda, matrix = "gamma")
+
+```
+
+```{r lda_model_try2}
+
+not_useful_words <- c("year", "world", "make", "find", 'set', '-', 'tell', 'becom', 'film', "–")
+
+synonyms <- list(
+  list(word = "kill", syns = c("kill", "killer", 'murder')),
+  list(word = "dead", syns = c("dead", "death")),
+  list(word = "life", syns = c("life", "live")),
+  list(word = "crime", syns = c("crimin", "crime")),
+  list(word = "love", syns = c("love", "lover"))
+)
+
+replaceSynonyms <- content_transformer(function(x, syn=NULL) { 
+  Reduce(function(a,b) {
+    gsub(paste0("\\b(", paste(b$syns, collapse="|"),")\\b"), b$word, a)}, syn, x)   
+})
+
+dt_plot_tf2 <- corpus_plot %>% 
+  tm_map(removeWords, not_useful_words) %>% 
+  tm_map(replaceSynonyms, synonyms) %>% 
+  # DocumentTermMatrix(control = list(weighting = function(x) weightTf(x)))
+  DocumentTermMatrix(control = list(weighting = function(x) weightTfIdf(x)))
+
+t <- dt_plot_tf2 %>% ceiling()
+t$v <- as.integer(t$v)
+attr(t, which = 'weighting') <- c('term frecuency', 'tf')
+
+lda_tf2 <- LDA(t, k = 15, 
+           control = list(estimate.alpha = FALSE, alpha = 1, 
+                          seed = 1234))
+
+# t <- terms(lda_tf, 10)
+# t1 <- topics(lda_tf, 5)
+
+tidy(lda_tf2, matrix = "beta") %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta) %>% 
+  mutate(term = reorder(term, beta)) %>%
+  ggplot(aes(term, beta, fill = factor(topic))) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip() +
+  scale_fill_manual(values = wes_palette('FantasticFox1', 10, type = 'continuous'))
+
+lda_documents <- tidy(lda_tf2, matrix = "gamma")
+
+lda_documents %>% 
+  filter(document == 'Gabriela')
+
+df <- lda_documents %>% 
+  spread(topic, gamma) 
+
+tmatrix <- as.matrix(df[,-1])
+rownames(tmatrix) <- df$document
+
+recommender_cosine(tmatrix, 'Memento')
 
 ```
 
